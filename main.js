@@ -5,12 +5,15 @@ const fs = require('fs');
 function createWindow() {
   const win = new BrowserWindow({
     width: 800,
-    height: 600,
+    height: 520,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
     },
   });
+
+  // 移除窗口菜单栏
+  win.setMenu(null);
 
   // 检查是否有环境变量指示使用预览模式
   const isProd = process.env.NODE_ENV === 'production';
@@ -19,7 +22,7 @@ function createWindow() {
   if (isPreview) {
     // 预览服务器模式
     win.loadURL('http://localhost:4173');
-  } else if (!isProd && fs.existsSync(path.join(__dirname, 'dist'))) {
+  } else if (!isProd) {
     // 开发模式：加载Vite开发服务器
     win.loadURL('http://localhost:5173');
     // win.webContents.openDevTools(); // 注释掉自动打开DevTools
