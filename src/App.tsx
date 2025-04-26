@@ -3,8 +3,7 @@ import './App.css'
 function App() {
   return (
     <div 
-      className="flex flex-col bg-gray-100 text-gray-800 font-sans overflow-hidden"
-      style={{ height: '400px' }}
+      className="flex flex-col bg-blue-100 text-gray-800 font-sans overflow-hidden h-full w-full"
     >
       {/* Custom Title Bar */}
       <div className="bg-white shadow-sm border-b border-gray-200 px-3 py-1 flex justify-between items-center flex-shrink-0">
