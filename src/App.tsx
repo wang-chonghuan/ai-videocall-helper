@@ -1,13 +1,17 @@
 import './App.css'
-import Dashboard from './pages/dashboard';
+import { Routes, Route } from 'react-router-dom';
+import DashboardLayout from './pages/dashboard';
+import QuickStart from './pages/quick-start';
+import PlaceholderDashboardContent from './components/placeholder-dashboard';
 
 function App() {
   return (
-    <div
-      className="flex flex-col bg-blue-100 text-gray-800 font-sans overflow-hidden h-full w-full"
-    >
-      <Dashboard />
-    </div>
+    <Routes>
+      <Route path="/" element={<DashboardLayout />}>
+        <Route index element={<PlaceholderDashboardContent />} />
+        <Route path="team" element={<QuickStart />} />
+      </Route>
+    </Routes>
   );
 }
 

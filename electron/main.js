@@ -28,7 +28,7 @@ function createWindow() {
     // win.webContents.openDevTools(); // 注释掉自动打开DevTools
   } else {
     // 生产模式：直接加载构建后的文件
-    win.loadFile(path.join(__dirname, 'dist/index.html'));
+    win.loadFile(path.join(__dirname, '..', 'dist/index.html'));
   }
 }
 
@@ -41,4 +41,4 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
-});
+}); 
