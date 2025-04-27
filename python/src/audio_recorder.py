@@ -1,9 +1,59 @@
-import pyaudiowpatch as pyaudiow
+"""
+Audio Recorder module for capturing system audio using WASAPI loopback devices.
+Based on official PyAudioWPatch examples.
+"""
+
+from queue import Queue
+import pyaudiowpatch as pyaudio
 import wave
 import sys
 import time
 import io # 确保导入 io 模块
-import datetime # <--- 导入 datetime
+import datetime # 导入 datetime
+import os
+import atexit
+import locale
+
+# --- 控制台编码设置 ---
+# 在文件顶部尽早设置
+try:
+    # 确保控制台可以显示中文字符
+    if sys.platform == 'win32':
+        # 在 Windows 上，尝试设置控制台代码页为 UTF-8
+        os.system('chcp 65001 > nul')
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    
+    # 打印当前控制台编码信息，便于调试
+    print(f"当前控制台编码: {sys.stdout.encoding}")
+    print(f"当前系统默认编码: {sys.getdefaultencoding()}")
+    print(f"当前区域设置: {locale.getpreferredencoding()}")
+except Exception as e:
+    print(f"Warning: 设置控制台编码时出错: {e}")
+
+# --- 锁文件机制 ---
+LOCK_FILE = "audio_recorder.lock"
+
+# 检查锁文件
+if os.path.exists(LOCK_FILE):
+    print(f"Found lock file {LOCK_FILE}, another recording process may be running.")
+    print("If no other process is running, please delete the file and retry.")
+    sys.exit(1)
+
+# 创建锁文件
+with open(LOCK_FILE, "w", encoding="utf-8") as f:
+    f.write(str(os.getpid()))
+
+# 注册退出时清理锁文件
+def cleanup_lock():
+    if os.path.exists(LOCK_FILE):
+        try:
+            os.remove(LOCK_FILE)
+            print("Lock file has been removed.")
+        except Exception as e:
+            print(f"Error when cleaning up lock file: {e}")
+
+atexit.register(cleanup_lock)
 
 # --- Force stdout and stderr to use UTF-8 ---
 # 这对于在 Windows 上运行 subprocess 并打印非 ASCII 字符至关重要
@@ -23,217 +73,250 @@ if sys.stderr.encoding != 'utf-8':
         print(f"Warning: Failed to set sys.stderr to UTF-8: {e}")
 # --- End UTF-8 setup ---
 
-# 录制参数
-FORMAT = pyaudiow.paInt16  # 格式，例如 paInt16 (16bit)
-CHANNELS = 2             # 声道数，通常是 2 (立体声)
-RATE = 48000             # 采样率，例如 48000 Hz
-CHUNK = 1024             # 每次读取的帧数
-# RECORD_SECONDS = 5       # 录制时长 (秒)
-# WAVE_OUTPUT_FILENAME = "output.wav" # 输出文件名
-
-print("正在初始化 PyAudio...")
-
-p = pyaudiow.PyAudio()
-
-print("PyAudio 初始化完成。")
-
-# --- 查找 WASAPI Loopback 设备 ---
-# PyAudioWPatch 提供了方便的方法来查找 loopback 设备
-
-default_wasapi_info = None # 先初始化为 None
-try:
-    # --- 查找 WASAPI Host API 信息 ---
-    # 使用 get_host_api_info_by_type 获取指定类型的 Host API 信息
-    default_wasapi_info = p.get_host_api_info_by_type(pyaudiow.paWASAPI)
-
-except OSError:
-    print("错误: 无法获取 WASAPI Host API 信息。您的系统可能不支持 WASAPI。", file=sys.stderr)
-    p.terminate()
-    sys.exit(1)
-
-if not default_wasapi_info:
-    # 这段理论上在 get_host_api_info_by_type 成功后不会执行，除非 PyAudio 内部返回了空
-    print("错误: 未找到 WASAPI Host API 信息 (即使 get_host_api_info_by_type 没有抛出错误)。")
-    p.terminate()
-    sys.exit(1)
-
-print(f"获取到 WASAPI Host API 信息: {default_wasapi_info['name']}")
-
-print("查找默认 WASAPI Loopback 设备...")
-
-try:
-    # 使用新的方法获取默认的 WASAPI loopback 设备信息
-    default_loopback_device = p.get_default_wasapi_loopback()
-    print(f"找到默认 WASAPI Loopback 设备: {default_loopback_device['name']}")
-    device_index = default_loopback_device["index"]
-
-except Exception as e:
-    print(f"错误: 无法找到默认 WASAPI Loopback 设备，或发生错误: {e}")
-    print("尝试列出所有设备并查找 loopback 设备...")
-
-    device_index = None
-    # 迭代所有设备，查找是 WASAPI 并且支持 loopback 的设备
-    # 注意: Loopback 设备在 PyAudioWPatch 中被标记为输入设备
-    for i in range(p.get_device_count()):
-        dev = p.get_device_info_by_index(i)
-        # print(f"设备 {i}: {dev['name']}, Host API: {p.get_host_api_info_by_index(dev['hostApi'])['name']}, 输入通道: {dev['maxInputChannels']}, 输出通道: {dev['maxOutputChannels']}")
-
-        if (dev["hostApi"] == default_wasapi_info["index"] and
-            dev["maxInputChannels"] > 0 and # 必须是输入设备 (loopback device is an input)
-            'Loopback' in dev['name']): # 一个简单的名称检查，可能需要更精确的判断
-            print(f"找到一个 WASAPI Loopback 设备 (索引 {i}): {dev['name']}")
-            device_index = i
-            break # 找到第一个就用
-
-    if device_index is None:
-         print("错误: 未找到 WASAPI Loopback 输入设备。请确保您的音频设备支持 WASAPI Loopback。")
-         p.terminate()
-         sys.exit(1)
+class AudioRecorderException(Exception):
+    """Base class for AudioRecorder's exceptions"""
+    pass
 
 
-print(f"使用设备索引: {device_index}")
+class WASAPINotFound(AudioRecorderException):
+    """WASAPI is not available on the system"""
+    pass
 
-# --- 检查并确定支持的采样率 ---
-supported_rate = None
 
-# 1. 尝试初始 RATE (44100 Hz)
-print(f"正在检查设备 {device_index} 是否支持 采样率={RATE}Hz, 格式={FORMAT}, 声道数={CHANNELS}...")
-try:
-    if p.is_format_supported(RATE,
-                             input_device=device_index,
-                             input_channels=CHANNELS,
-                             input_format=FORMAT):
-        supported_rate = RATE
-        print(f"设备支持 {RATE}Hz。")
-    else:
-        print(f"设备不支持 {RATE}Hz。将尝试 48000Hz。")
+class InvalidDevice(AudioRecorderException):
+    """Requested audio device is not valid or not found"""
+    pass
 
-except ValueError as e:
-    # 捕获 ValueError，检查是否是关于采样率的错误
-    if 'Invalid sample rate' in str(e):
-        print(f"设备不支持 {RATE}Hz (检查时引发错误)。将尝试 48000Hz。")
-    else:
-        # 如果是其他 ValueError (例如无效设备索引)，则重新抛出或退出
-        print(f"检查格式支持性时出错 (可能是无效的设备索引 {device_index}?): {e}", file=sys.stderr)
-        p.terminate()
-        sys.exit(1)
-except Exception as e:
-    # 捕获其他可能的未知错误
-    print(f"检查 {RATE}Hz 支持性时发生未知错误: {e}", file=sys.stderr)
-    p.terminate()
-    sys.exit(1)
 
-# 2. 如果初始 RATE 不支持，尝试 48000 Hz
-if supported_rate is None:
-    rate_to_try = 48000
-    print(f"正在尝试检查 {rate_to_try}Hz...")
-    try:
-        if p.is_format_supported(rate_to_try,
-                                 input_device=device_index,
-                                 input_channels=CHANNELS,
-                                 input_format=FORMAT):
-            supported_rate = rate_to_try
-            RATE = rate_to_try # <--- 更新全局 RATE 变量
-            print(f"设备支持 {RATE}Hz。将使用此采样率。")
-        else:
-            print(f"设备似乎也不支持 {rate_to_try}Hz。")
-    except ValueError as e:
-        if 'Invalid sample rate' in str(e):
-             print(f"设备不支持 {rate_to_try}Hz (检查时引发错误)。")
-        else:
-             print(f"检查 {rate_to_try}Hz 支持性时出错: {e}", file=sys.stderr)
-             # 在这里不立即退出，让最终检查处理
-    except Exception as e:
-        print(f"检查 {rate_to_try}Hz 支持性时发生未知错误: {e}", file=sys.stderr)
-        # 在这里不立即退出，让最终检查处理
-
-# 3. 最终检查是否找到了支持的速率
-if supported_rate is None:
-     print(f"错误: 设备 {device_index} 既不支持 44100Hz 也不支持 48000Hz (或其他参数)。请检查设备规格或尝试其他采样率。", file=sys.stderr)
-     p.terminate()
-     sys.exit(1)
-
-# --- 打开音频流进行录制 ---
-print("正在打开音频流...")
-stream = None
-frames = []
-recording_start_time = datetime.datetime.now() # <--- 记录开始时间
-
-try:
-    stream = p.open(format=FORMAT,
-                    channels=CHANNELS,
-                    rate=RATE,
-                    input=True,
-                    input_device_index=device_index,
-                    frames_per_buffer=CHUNK)
-
-    print("音频流打开成功。开始录制... (按 Ctrl+C 停止)")
-
-    # --- 无限循环录制 ---
-    while True:
-        try:
-            data = stream.read(CHUNK)
-            frames.append(data)
-        except KeyboardInterrupt: # <--- 捕获 Ctrl+C
-            print("\n检测到 Ctrl+C，停止录制...")
-            break
-        except IOError as e:
-            # 检查是否是输入溢出错误 (常见于长时间录制)
-            if e.errno == pyaudiow.paInputOverflowed:
-                print("警告: 输入溢出 (Input overflowed)，部分数据可能丢失。", file=sys.stderr)
-                # 可以选择继续录制，或者在这里 break
-                # frames.append(b'\x00' * CHUNK * CHANNELS * p.get_sample_size(FORMAT)) # 可选：插入静音数据
+class AudioRecorder:
+    """
+    Audio recorder class for capturing system audio using WASAPI loopback.
+    Supports recording, pausing, and saving to WAV files.
+    """
+    
+    CHUNK_SIZE = 1024
+    FORMAT = pyaudio.paInt16
+    
+    def __init__(self):
+        """Initialize the audio recorder"""
+        self.p = pyaudio.PyAudio()
+        self.output_queue = Queue()
+        self.stream = None
+        self.recording = False
+        self.default_device = None
+        self.current_device = None
+    
+    def __enter__(self):
+        """Context manager entry method"""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit method - ensures proper cleanup"""
+        self.close()
+        
+    def callback(self, in_data, frame_count, time_info, status):
+        """Callback function for audio processing"""
+        if len(in_data) > 0:
+            self.output_queue.put(in_data)
+            # 如果是第一次收到数据或每100帧打印一次
+            if hasattr(self, 'frame_counter'):
+                self.frame_counter += 1
+                if self.frame_counter % 100 == 0:
+                    print(f"Received {self.frame_counter} audio frames")
             else:
-                print(f"读取音频流时发生 IO 错误: {e}", file=sys.stderr)
-                break # 其他 IO 错误，停止录制
+                self.frame_counter = 1
+                print("First audio frame received")
+        else:
+            print("Warning: Received empty audio frame")
+        return (in_data, pyaudio.paContinue)
+    
+    def find_loopback_device(self):
+        """Find the default WASAPI loopback device"""
+        try:
+            # Get WASAPI info
+            wasapi_info = self.p.get_host_api_info_by_type(pyaudio.paWASAPI)
+        except OSError:
+            raise WASAPINotFound("WASAPI is not available on this system")
+        
+        # Try to get the default WASAPI loopback device
+        try:
+            default_loopback = self.p.get_default_wasapi_loopback()
+            print(f"Found default WASAPI loopback device: {default_loopback['name']}")
+            return default_loopback
         except Exception as e:
-             print(f"录制循环中发生未知错误: {e}", file=sys.stderr)
-             break # 未知错误，停止录制
+            print(f"Couldn't find default loopback device: {e}")
+            print("Searching for alternative loopback devices...")
+            
+            # Get default WASAPI speakers
+            default_speakers = self.p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
+            
+            # Look for a loopback device matching the default speakers
+            for loopback in self.p.get_loopback_device_info_generator():
+                if default_speakers["name"] in loopback["name"]:
+                    print(f"Found matching loopback device: {loopback['name']}")
+                    return loopback
+            
+            # If we get here, no suitable device was found
+            raise InvalidDevice("No suitable loopback device found")
+    
+    def list_devices(self):
+        """List all audio devices with details"""
+        self.p.print_detailed_system_info()
+    
+    def start_recording(self, device_index=None):
+        """
+        Start recording from the specified device or find a default one
+        
+        Args:
+            device_index: Optional index of the device to record from
+        """
+        # Close any existing stream
+        self.stop_recording()
+        
+        # Determine which device to use
+        if device_index is not None:
+            try:
+                self.current_device = self.p.get_device_info_by_index(device_index)
+                print(f"Using specified device: {self.current_device['name']}")
+            except Exception as e:
+                print(f"Error using specified device {device_index}: {e}")
+                print("Falling back to default device")
+                self.current_device = self.find_loopback_device()
+        else:
+            # Use default device
+            self.current_device = self.find_loopback_device()
+        
+        # Store recording start time
+        self.recording_start_time = datetime.datetime.now()
+        
+        # Open the stream
+        try:
+            self.stream = self.p.open(
+                format=self.FORMAT,
+                channels=self.current_device["maxInputChannels"],
+                rate=int(self.current_device["defaultSampleRate"]),
+                frames_per_buffer=self.CHUNK_SIZE,
+                input=True,
+                input_device_index=self.current_device["index"],
+                stream_callback=self.callback
+            )
+            
+            self.recording = True
+            print(f"Recording started from device: {self.current_device['name']}")
+            print("Press Ctrl+C to stop recording...")
+            
+        except Exception as e:
+            raise AudioRecorderException(f"Failed to start recording: {e}")
+    
+    def pause_recording(self):
+        """Pause the recording stream"""
+        if self.stream and not self.stream.is_stopped():
+            self.stream.stop_stream()
+            print("Recording paused")
+    
+    def resume_recording(self):
+        """Resume a paused recording stream"""
+        if self.stream and self.stream.is_stopped():
+            self.stream.start_stream()
+            print("Recording resumed")
+    
+    def stop_recording(self):
+        """Stop recording and close the stream"""
+        if self.stream:
+            self.stream.stop_stream()
+            self.stream.close()
+            self.stream = None
+            self.recording = False
+            print("Recording stopped")
+    
+    def save_recording(self, filename=None):
+        """
+        Save the recorded audio to a WAV file
+        
+        Args:
+            filename: Optional filename to save to. If None, generates a timestamped filename.
+        
+        Returns:
+            The filename the recording was saved to
+        """
+        if not filename:
+            # Generate a filename based on timestamp
+            timestamp = self.recording_start_time.strftime("%Y%m%d_%H%M%S")
+            filename = f"output_{timestamp}.wav"
+        
+        if not self.output_queue.empty():
+            print(f"Saving recording to {filename}...")
+            
+            with wave.open(filename, 'wb') as wf:
+                wf.setnchannels(self.current_device["maxInputChannels"])
+                wf.setsampwidth(pyaudio.get_sample_size(self.FORMAT))
+                wf.setframerate(int(self.current_device["defaultSampleRate"]))
+                
+                # Write all audio data from the queue
+                while not self.output_queue.empty():
+                    wf.writeframes(self.output_queue.get())
+            
+            print(f"Recording saved to {filename}")
+            return filename
+        else:
+            print("No audio data to save")
+            return None
+    
+    def close(self):
+        """Close the recorder and release resources"""
+        self.stop_recording()
+        self.p.terminate()
+        print("Audio recorder closed")
 
 
-    print("录制循环结束。")
+def record_audio(duration=None):
+    """
+    Simple function to record audio for a specified duration
+    
+    Args:
+        duration: Recording duration in seconds. If None, records until Ctrl+C.
+    
+    Returns:
+        Filename of the saved recording
+    """
+    with AudioRecorder() as recorder:
+        try:
+            # Start recording
+            recorder.start_recording()
+            
+            if duration:
+                # Record for specified duration
+                print(f"Recording for {duration} seconds...")
+                time.sleep(duration)
+            else:
+                # Record until interrupted
+                try:
+                    while True:
+                        time.sleep(0.1)
+                except KeyboardInterrupt:
+                    print("\nRecording interrupted by user")
+            
+            # Stop recording and save
+            recorder.stop_recording()
+            return recorder.save_recording()
+            
+        except AudioRecorderException as e:
+            print(f"Recording error: {e}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            return None
 
-except Exception as e:
-    # 这个是 stream.open() 可能发生的错误
-    print(f"打开音频流时发生错误: {e}", file=sys.stderr)
-    sys.exit(1)
 
-finally:
-    # --- 停止和关闭流以及 PyAudio ---
-    if stream is not None and stream.is_active(): # 检查流是否还活跃
-        print("正在停止和关闭音频流...")
-        stream.stop_stream()
-        stream.close()
-        print("音频流已关闭。")
-
-print("正在终止 PyAudio...")
-p.terminate()
-print("PyAudio 已终止。")
-
-
-# --- 将录制的音频保存到 WAV 文件 ---
-if not frames:
-    print("没有录制到任何音频数据，不保存文件。")
-    sys.exit(0) # 正常退出
-
-# --- 生成带时间戳的文件名 ---
-timestamp = recording_start_time.strftime("%Y%m%d_%H%M%S")
-WAVE_OUTPUT_FILENAME = f"output_{timestamp}.wav"
-print(f"准备将录音保存到文件: {WAVE_OUTPUT_FILENAME}")
-
-try:
-    wf = wave.open(WAVE_OUTPUT_FILENAME, 'wb')
-    wf.setnchannels(CHANNELS)
-    wf.setsampwidth(p.get_sample_size(FORMAT))
-    wf.setframerate(RATE)
-    wf.writeframes(b''.join(frames))
-    wf.close()
-    print(f"文件 '{WAVE_OUTPUT_FILENAME}' 已成功保存。")
-    # 通过标准输出将实际文件名返回给调用者
-    print(f"录音文件路径: {WAVE_OUTPUT_FILENAME}")
-
-except Exception as e:
-    print(f"保存文件时发生错误: {e}", file=sys.stderr)
-    sys.exit(1)
-
-print("脚本执行完毕。")
+if __name__ == "__main__":
+    # When run directly, record until Ctrl+C is pressed
+    try:
+        filename = record_audio()
+        if filename:
+            print(f"Recording file path: {filename}")
+        else:
+            print("Recording failed")
+    except KeyboardInterrupt:
+        print("\nProgram interrupted by user")
+    except Exception as e:
+        print(f"Error: {e}")

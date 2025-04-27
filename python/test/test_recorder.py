@@ -1,135 +1,165 @@
-import subprocess
+"""
+Test script for audio_recorder.py. Provides a simple interactive interface
+to test recording capabilities.
+"""
+
 import sys
 import os
 import time
-import signal
+from queue import Queue
 
-# 假定此测试脚本是在 python/ 目录下，并且虚拟环境已激活
-# 所以我们可以直接使用 'python' 命令，它会指向虚拟环境中的解释器
-# 并指定要运行的脚本路径相对于当前工作目录 (python/)
-AUDIO_RECORDER_SCRIPT_PATH = os.path.join("src", "audio_recorder.py")
+# Add the src directory to the path so we can import the AudioRecorder class
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+from audio_recorder import AudioRecorder, AudioRecorderException
 
-def run_audio_recorder_interactive():
-    """
-    使用 Popen 启动 audio_recorder.py 脚本，允许用户交互式停止，
-    并捕获其输出。
-    """
-    print(f"--- 启动脚本: {AUDIO_RECORDER_SCRIPT_PATH} ---")
-    print("录音程序将在后台运行。请在此窗口按 Ctrl+C 来停止录音和测试。")
-    print("----------------------------------------------------------")
 
-    process = None
+def print_header():
+    """Print a header for the test application"""
+    print("\n" + "="*60)
+    print("WASAPI Audio Recorder Test Application")
+    print("="*60)
+
+
+def print_help():
+    """Print available commands"""
+    print("\nAvailable commands:")
+    print("  list          - List all audio devices")
+    print("  record [idx]  - Start recording (optionally from device with index idx)")
+    print("  pause         - Pause current recording")
+    print("  resume        - Resume paused recording")
+    print("  stop          - Stop recording and save to file")
+    print("  auto [sec]    - Automatically record for sec seconds (default: 5)")
+    print("  exit/quit     - Exit the application")
+    print("  help          - Show this help message")
+
+
+def run_interactive_test():
+    """Run an interactive test of the AudioRecorder class"""
+    recorder = None
+    current_recording = None
+    
+    print_header()
+    print("This test application allows you to test the WASAPI loopback recording")
+    print("functionality. You can record system audio and save it to a WAV file.")
+    print_help()
+    
     try:
-        # 使用 subprocess.Popen 启动脚本，不阻塞父进程
-        # stdout=subprocess.PIPE 和 stderr=subprocess.PIPE 用于捕获输出
-        # text=True 和 encoding='utf-8' 用于解码输出
-        process = subprocess.Popen(
-            [sys.executable, AUDIO_RECORDER_SCRIPT_PATH],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding='utf-8',
-            bufsize=1,  # 行缓冲，可能有助于实时获取 print 输出
-            universal_newlines=True # 确保换行符被正确处理
-        )
-
-        # 等待子进程结束 (例如用户按 Ctrl+C 终止了子进程，或者子进程自己出错退出)
-        # 同时实时打印子进程的输出
-        stdout_lines = []
-        stderr_lines = []
-
-        print("--- 子进程实时输出 (按 Ctrl+C 停止录音) ---")
+        recorder = AudioRecorder()
+        
         while True:
-            # 尝试非阻塞地读取 stdout
-            stdout_line = process.stdout.readline()
-            if stdout_line:
-                print(f"[RECORDER STDOUT] {stdout_line.strip()}")
-                stdout_lines.append(stdout_line)
-
-            # 尝试非阻塞地读取 stderr
-            stderr_line = process.stderr.readline()
-            if stderr_line:
-                print(f"[RECORDER STDERR] {stderr_line.strip()}", file=sys.stderr)
-                stderr_lines.append(stderr_line)
-
-            # 检查子进程是否已结束
-            return_code = process.poll()
-            if return_code is not None:
-                print(f"\n--- 子进程已结束，退出码: {return_code} ---")
-                # 读取剩余的输出
-                for remaining_line in process.stdout.readlines():
-                     print(f"[RECORDER STDOUT] {remaining_line.strip()}")
-                     stdout_lines.append(remaining_line)
-                for remaining_line in process.stderr.readlines():
-                     print(f"[RECORDER STDERR] {remaining_line.strip()}", file=sys.stderr)
-                     stderr_lines.append(remaining_line)
-                break # 退出循环
-
-            # 短暂休眠避免 CPU 占用过高
-            time.sleep(0.1)
-
-
-        # --- 处理结果 ---
-        final_stdout = "".join(stdout_lines)
-        final_stderr = "".join(stderr_lines)
-
-        if return_code != 0 and not final_stderr: # 如果有错误码但stderr为空，可能被Ctrl+C终止
-             print("\n--- 脚本可能被手动终止 (Ctrl+C) ---")
-
-        if final_stderr:
-             print("\n--- 脚本执行过程中出现错误 ---")
-        # else: # 如果 return_code 为 0 且 stderr 为空
-        #      print("\n--- 脚本似乎已成功完成 (如果被正常停止) ---")
-
-
-        # 解析 stdout 来获取录音文件的路径
-        if final_stdout:
-             file_path_line = [line for line in final_stdout.splitlines() if "录音文件路径:" in line]
-             if file_path_line:
-                 parts = file_path_line[-1].split(":", 1) # 取最后一行匹配的
-                 if len(parts) > 1:
-                     recorded_file = parts[1].strip()
-                     print(f"录音文件应保存在: {recorded_file}")
-                 else:
-                     print("警告: 在标准输出中找到 '录音文件路径:' 但无法解析路径。", file=sys.stderr)
-             else:
-                  # 如果没有找到路径，检查是否是因为没有录制数据
-                  if "没有录制到任何音频数据" not in final_stdout:
-                       print("警告: 未在标准输出中找到 '录音文件路径:' 行。", file=sys.stderr)
-
-    except KeyboardInterrupt:
-        print("\n--- 在测试脚本中检测到 Ctrl+C，正在尝试终止录音脚本... ---")
-        if process and process.poll() is None: # 检查子进程是否仍在运行
             try:
-                # 尝试优雅地发送 SIGINT (Ctrl+C 信号)
-                # 注意：在 Windows 上，这可能不会像 Linux/macOS 那样直接触发 KeyboardInterrupt
-                # 它更可能直接终止进程
-                process.send_signal(signal.SIGINT)
-                print("已发送 SIGINT 信号。等待子进程退出...")
-                process.wait(timeout=5) # 等待最多5秒
-            except subprocess.TimeoutExpired:
-                print("子进程在 SIGINT 后未能在 5 秒内退出，强制终止...")
-                process.terminate() # 更强制的终止
-                process.wait() # 等待终止完成
-            except Exception as sig_e:
-                 print(f"发送信号时出错: {sig_e}。尝试强制终止...")
-                 process.terminate()
-                 process.wait()
-
-        print("--- 测试脚本已停止 ---")
-
-    except FileNotFoundError:
-        print(f"错误: 找不到 Python 解释器或脚本文件 '{AUDIO_RECORDER_SCRIPT_PATH}'。", file=sys.stderr)
+                command = input("\nEnter command: ").strip().lower().split()
+                if not command:
+                    continue
+                
+                cmd = command[0]
+                args = command[1:] if len(command) > 1 else []
+                
+                if cmd in ["exit", "quit"]:
+                    print("Exiting...")
+                    break
+                
+                elif cmd == "help":
+                    print_help()
+                
+                elif cmd == "list":
+                    print("\nListing all audio devices:")
+                    recorder.list_devices()
+                
+                elif cmd == "record":
+                    if current_recording:
+                        print("Already recording. Stop the current recording first.")
+                    else:
+                        try:
+                            device_index = int(args[0]) if args else None
+                            recorder.start_recording(device_index)
+                            current_recording = True
+                        except ValueError:
+                            print(f"Invalid device index: {args[0]}")
+                        except AudioRecorderException as e:
+                            print(f"Recording error: {e}")
+                
+                elif cmd == "pause":
+                    if current_recording:
+                        recorder.pause_recording()
+                    else:
+                        print("Not currently recording.")
+                
+                elif cmd == "resume":
+                    if current_recording:
+                        recorder.resume_recording()
+                    else:
+                        print("No recording to resume.")
+                
+                elif cmd == "stop":
+                    if current_recording:
+                        recorder.stop_recording()
+                        filename = recorder.save_recording()
+                        if filename:
+                            print(f"Recording saved to: {filename}")
+                        current_recording = None
+                    else:
+                        print("Not currently recording.")
+                
+                elif cmd == "auto":
+                    if current_recording:
+                        print("Already recording. Stop the current recording first.")
+                    else:
+                        try:
+                            duration = int(args[0]) if args else 5
+                            print(f"Automatic recording for {duration} seconds...")
+                            recorder.start_recording()
+                            current_recording = True
+                            
+                            # Count down
+                            for i in range(duration, 0, -1):
+                                print(f"Recording... {i} seconds remaining", end="\r")
+                                time.sleep(1)
+                            print("\nFinished recording.                      ")
+                            
+                            recorder.stop_recording()
+                            filename = recorder.save_recording()
+                            if filename:
+                                print(f"Recording saved to: {filename}")
+                            current_recording = None
+                        except ValueError:
+                            print(f"Invalid duration: {args[0]}")
+                        except AudioRecorderException as e:
+                            print(f"Recording error: {e}")
+                            current_recording = None
+                
+                else:
+                    print(f"Unknown command: {cmd}")
+                    print_help()
+            
+            except KeyboardInterrupt:
+                if current_recording:
+                    print("\nRecording interrupted.")
+                    recorder.stop_recording()
+                    filename = recorder.save_recording()
+                    if filename:
+                        print(f"Recording saved to: {filename}")
+                    current_recording = None
+                else:
+                    print("\nInterrupted. Enter 'exit' to quit.")
+            
+            except Exception as e:
+                print(f"Error: {e}")
+                if current_recording:
+                    try:
+                        recorder.stop_recording()
+                        current_recording = None
+                    except:
+                        pass
+    
     except Exception as e:
-        print(f"执行测试脚本时发生意外错误: {e}", file=sys.stderr)
-        # 确保即使出错也尝试终止子进程
-        if process and process.poll() is None:
-            print("发生错误，尝试终止子进程...")
-            process.terminate()
-            process.wait()
+        print(f"Fatal error: {e}")
+    
+    finally:
+        if recorder:
+            recorder.close()
+        print("Test completed.")
 
 
 if __name__ == "__main__":
-    print("请确保您已激活 Python 虚拟环境...")
-    print("----------------------------------------------------------")
-    run_audio_recorder_interactive()
+    run_interactive_test()
